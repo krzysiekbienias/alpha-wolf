@@ -1,3 +1,4 @@
+import abc
 import yfinance as yf
 import matplotlib.pyplot as plt
 from typing import TypeVar, Iterable, Tuple, Dict, List
@@ -5,14 +6,14 @@ import QuantLib as ql
 import pandas as pd
 from tool_kit.config_loader import CONFIG
 import pandas_datareader.data as web
-
+from polygon import RESTClient
 
 FRED_SERIES_IDS = {
     # Treasury Yields
     "10Y": "DGS10",  # 10-Year Treasury Constant Maturity Rate
-    "5Y": "DGS5",    # 5-Year Treasury Constant Maturity Rate
-    "2Y": "DGS2",    # 2-Year Treasury Constant Maturity Rate
-    "1Y": "DGS1",    # 1-Year Treasury Constant Maturity Rate
+    "5Y": "DGS5",  # 5-Year Treasury Constant Maturity Rate
+    "2Y": "DGS2",  # 2-Year Treasury Constant Maturity Rate
+    "1Y": "DGS1",  # 1-Year Treasury Constant Maturity Rate
     "6M": "DGS6MO",  # 6-Month Treasury Constant Maturity Rate
     "3M": "DGS3MO",  # 3-Month Treasury Constant Maturity Rate
     "1M": "DGS1MO",  # 1-Month Treasury Constant Maturity Rate
@@ -43,12 +44,17 @@ FRED_SERIES_IDS = {
 
     # Stock Market Indices
     "SP500": "SP500",  # S&P 500 Index
-    "DJIA": "DJIA",    # Dow Jones Industrial Average
+    "DJIA": "DJIA",  # Dow Jones Industrial Average
     "NASDAQ": "NASDAQCOM",  # NASDAQ Composite Index
 }
 
 
-class MarketDataExtractor:
+#
+# client=RESTClient('2I8_POlvy5wQLpOUZIwIsl7LH9Hm8yPp')
+#aggs = client.get_daily_open_close_agg()
+
+
+class MarketDataExtractor(abc.ABC):
     """
     Market Data Extraction Utility.
 
@@ -112,9 +118,9 @@ class MarketDataExtractor:
     ```
     """
 
-    def __init__(self,
-                 equity_tickers: (str, List[str]) = "TSLA",
-                 instrument_id: str='1Y',
+    def __init__(self, data_provider: str,
+                 tickers: (str, List[str]) = "TSLA",
+                 instrument_id: str = '1Y',
                  start_period: str = None,
                  end_period: str = None):
         """
@@ -134,14 +140,55 @@ class MarketDataExtractor:
         end_period : str, optional, default=None
             The end date for data retrieval (YYYY-MM-DD format).
         """
-        self._instrument_id = instrument_id
-        self._tickers = equity_tickers
-        self._start_period = start_period
-        self._end_period = end_period
+        self.__data_provider = data_provider
+        self.__tickers = tickers or []
+        self.__start_period = start_period
+        self.__end_period = end_period
 
-    def extract_equity_price(self,
-                     column_name="Close",
-                             offset='1d')->Dict[str, pd.DataFrame | List]:
+    # ===========================================
+    # REGION: Setters
+    # ===========================================
+    def set_data_provider(self, data_provider):
+        self.__data_provider = data_provider
+
+    def set_tickers(self, tickers):
+        self.__tickers = tickers
+
+    def set_start_period(self, start_period):
+        self.__start_period = start_period
+
+    def set_end_period(self, end_date):
+        self.__end_period = end_date
+
+    # ===========================================
+    # END REGION: Setters
+    # ===========================================
+
+    def get_data_provider(self):
+        return self.__data_provider
+
+    def get_tickers(self):
+        return self.__tickers
+
+    def get_start_period(self):
+        return self.__start_period
+
+    def get_end_period(self):
+        return self.__end_period
+
+    @abc.abstractmethod
+    def fetch_data(self):
+        """Abstract method to be implemented in child class to fetch market data from various sources."""
+        pass
+
+
+class YahooFinanceExtractor(MarketDataExtractor):
+    def __init__(self, start_date, end_date, tickers):
+        super().__init__(start_date, end_date, tickers)
+
+    def fetch_data(self,
+                   column_name="Close",
+                   offset='1d') -> Dict[str, pd.DataFrame | List]:
         # TODO refactor this method!
         """
         Extracts historical market data from Yahoo Finance.
@@ -170,23 +217,23 @@ class MarketDataExtractor:
         NotImplementedError:
             If an unsupported extraction case is encountered.
         """
-        if isinstance(self._tickers, str):
-            tickers = [self._tickers]
+        if isinstance(self.__tickers, str):
+            tickers = [self.__tickers]
         else:
-            tickers = self._tickers
+            tickers = self.__tickers
 
         underlier_prices_dict = {}
 
         # Fetching data for each ticker
         for ticker in tickers:
-            if self._start_period and self._end_period and self._start_period != self._end_period:
-                df = yf.download(ticker, start=self._start_period, end=self._end_period)[[column_name]]
+            if self.__start_period and self.__end_period and self.__start_period != self.__end_period:
+                df = yf.Ticker(ticker).history(start=self.__start_period, end=self.__end_period)[[column_name]]
                 underlier_prices_dict[ticker] = df
 
-            elif self._start_period and (self._end_period is None or self._start_period == self._end_period):
+            elif self.__start_period and (self.__end_period is None or self.__start_period == self.__end_period):
                 # Determine the actual end period only if None using QuantLib
-                if self._end_period is None:
-                    ql_start_date = ql.DateParser.parseISO(self._start_period)
+                if self.__end_period is None:
+                    ql_start_date = ql.DateParser.parseISO(self.__start_period)
                     # if we choose days as offset we move one day forward
                     if offset.endswith("d"):
                         days_back = int(offset[:-1])
@@ -200,11 +247,11 @@ class MarketDataExtractor:
 
                     computed_end_period = ql_end_date.ISO()
                 else:
-                    computed_end_period = self._end_period
+                    computed_end_period = self.__end_period
                 if offset.endswith("d"):
-                    df = yf.Ticker(ticker).history(start=self._start_period, end=computed_end_period)
+                    df = yf.Ticker(ticker).history(start=self.__start_period, end=computed_end_period)
                 else:
-                    df = yf.Ticker(ticker).history(start=computed_end_period, end=self._start_period)
+                    df = yf.Ticker(ticker).history(start=computed_end_period, end=self.__start_period)
 
                 if not df.empty:
                     underlier_prices_dict[ticker] = [df.index[0].date(), df.iloc[0][column_name]]
@@ -213,9 +260,15 @@ class MarketDataExtractor:
             else:
                 raise NotImplementedError("Unsupported extraction case.")
 
-            return underlier_prices_dict
+        return underlier_prices_dict
 
-    def fetch_interest_rate_data(self)->float|pd.DataFrame:
+
+class FREDExtractor(MarketDataExtractor):
+    def __init__(self, start_date, end_date, tickers):
+        super().__init__(start_date, end_date, tickers)
+        self.__api_key = CONFIG.FRED_API_KEY
+
+    def fetch_data(self) -> float | pd.DataFrame:
         """
         Fetches interest rate data from FRED.
 
@@ -234,45 +287,64 @@ class MarketDataExtractor:
         """
 
         try:
-            if self._start_period ==self._end_period:
+            if self.__start_period == self.__end_period:
 
                 # Fetch data from FRED
-                data = web.DataReader(FRED_SERIES_IDS[self._instrument_id], "fred", self._start_period, self._end_period,
+                data = web.DataReader(FRED_SERIES_IDS[self.__tickers],
+                                      "fred", self.__start_period,
+                                      self.__end_period,
                                       api_key=CONFIG['FRED_API_KEY'])
-                return data.values[0][0]/100
+                return data.values[0][0] / 100
             else:
                 NotImplementedError("Another cases are not implemented yet")
         except Exception as e:
             raise RuntimeError(f"Failed to fetch data: {e}")
 
 
+class PolygonIoExtractor(MarketDataExtractor):
+    """Extracts historical equity data from Polygon.io."""
+
+    def __init__(self, start_date, end_date, tickers):
+        super().__init__(start_date, end_date, tickers)
+        self.__api_key = CONFIG.POLYGON_API_KEY
+        self.__client = RESTClient(self.__api_key)
+
+    def fetch_data(self):
+        """Fetch historical stock data from Polygon.io."""
+        if not self.__tickers:
+            raise ValueError("No tickers specified for Polygon.io extractor.")
+
+        all_data = dict()
+        for ticker in self.__tickers:
+            aggs = self.__client.get_aggs(
+                ticker=ticker, multiplier=1, timespan="day",
+                from_=self.__start_period, to=self.__end_period
+            )
+            df = pd.DataFrame(aggs)
+            df["date"] = pd.to_datetime(df["t"], unit="ms")
+            df.set_index("date", inplace=True)
+            df["ticker"] = ticker
+            all_data.append(df[["o", "h", "l", "c", "v", "ticker"]])
+
+        if all_data:
+            self.set_data(pd.concat(all_data))
+        print(f"Fetched data from Polygon.io for {self.tickers}")
+
+    # ---------------- Factory Function ----------------
+
+
+class DataProviderFactory:
+    """Factory to create the appropriate MarketDataExtractor instance."""
+
     @staticmethod
-    def df_info(df: pd.DataFrame):
-        """
-        Displays and returns basic statistical information about the extracted time series.
+    def get_extractor(provider, start_date, end_date, tickers):
+        extractors = {
+            "YahooFinance": YahooFinanceExtractor,
+            "FRED": FREDExtractor,
+            "PolygonIO": PolygonIoExtractor
+        }
 
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            Data Frame to display info.
+        if provider not in extractors:
+            raise ValueError(f"Invalid provider: {provider}. Choose from {list(extractors.keys())}")
 
-        Returns:
-        --------
-        pd.DataFrame :
-            A DataFrame containing summary statistics.
-        """
-        print(df.describe())
-        return df.describe()
-
-    @staticmethod
-    def basic_statistic(df: pd.DataFrame):
-        """
-        Prints metadata and summary statistics of the provided DataFrame.
-
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            The DataFrame containing market data.
-        """
-
-        print(df.info())
+        return extractors[provider](start_date, end_date, tickers)

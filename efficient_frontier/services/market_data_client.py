@@ -120,7 +120,6 @@ class MarketDataExtractor(abc.ABC):
 
     def __init__(self, data_provider: str,
                  tickers: (str, List[str]) = "TSLA",
-                 instrument_id: str = '1Y',
                  start_period: str = None,
                  end_period: str = None):
         """
@@ -144,6 +143,7 @@ class MarketDataExtractor(abc.ABC):
         self.__tickers = tickers or []
         self.__start_period = start_period
         self.__end_period = end_period
+        self.extracted_data = None
 
     # ===========================================
     # REGION: Setters
@@ -160,22 +160,35 @@ class MarketDataExtractor(abc.ABC):
     def set_end_period(self, end_date):
         self.__end_period = end_date
 
+    def set_data(self, data: dict | pd.DataFrame):
+        self.extracted_data = data
+
     # ===========================================
     # END REGION: Setters
     # ===========================================
 
+    # ===========================================
+    # REGION: Getters
+    # ===========================================
+    @property
     def get_data_provider(self):
         return self.__data_provider
 
+    @property
     def get_tickers(self):
         return self.__tickers
 
+    @property
     def get_start_period(self):
         return self.__start_period
 
+    @property
     def get_end_period(self):
         return self.__end_period
 
+    # ===========================================
+    # END REGION: Getters
+    # ===========================================
     @abc.abstractmethod
     def fetch_data(self):
         """Abstract method to be implemented in child class to fetch market data from various sources."""
@@ -184,7 +197,7 @@ class MarketDataExtractor(abc.ABC):
 
 class YahooFinanceExtractor(MarketDataExtractor):
     def __init__(self, start_date, end_date, tickers):
-        super().__init__(start_date, end_date, tickers)
+        super().__init__("YahooFinance", start_date, end_date, tickers)
 
     def fetch_data(self,
                    column_name="Close",
@@ -217,23 +230,24 @@ class YahooFinanceExtractor(MarketDataExtractor):
         NotImplementedError:
             If an unsupported extraction case is encountered.
         """
-        if isinstance(self.__tickers, str):
-            tickers = [self.__tickers]
+        if isinstance(self.get_tickers, str):
+            tickers = [self.get_tickers]
         else:
-            tickers = self.__tickers
+            tickers = self.get_tickers
 
         underlier_prices_dict = {}
 
         # Fetching data for each ticker
         for ticker in tickers:
-            if self.__start_period and self.__end_period and self.__start_period != self.__end_period:
-                df = yf.Ticker(ticker).history(start=self.__start_period, end=self.__end_period)[[column_name]]
+            if self.get_start_period and self.get_end_period and self.get_start_period != self.get_end_period:
+                df = yf.Ticker(ticker).history(start=self.get_start_period, end=self.get_end_period)[[column_name]]
                 underlier_prices_dict[ticker] = df
 
-            elif self.__start_period and (self.__end_period is None or self.__start_period == self.__end_period):
+            elif self.get_start_period and (
+                    self.get_end_period is None or self.get_start_period == self.get_end_period):
                 # Determine the actual end period only if None using QuantLib
-                if self.__end_period is None:
-                    ql_start_date = ql.DateParser.parseISO(self.__start_period)
+                if self.get_end_period is None:
+                    ql_start_date = ql.DateParser.parseISO(self.get_start_period)
                     # if we choose days as offset we move one day forward
                     if offset.endswith("d"):
                         days_back = int(offset[:-1])
@@ -247,11 +261,11 @@ class YahooFinanceExtractor(MarketDataExtractor):
 
                     computed_end_period = ql_end_date.ISO()
                 else:
-                    computed_end_period = self.__end_period
+                    computed_end_period = self.get_end_period
                 if offset.endswith("d"):
-                    df = yf.Ticker(ticker).history(start=self.__start_period, end=computed_end_period)
+                    df = yf.Ticker(ticker).history(start=self.get_start_period, end=computed_end_period)
                 else:
-                    df = yf.Ticker(ticker).history(start=computed_end_period, end=self.__start_period)
+                    df = yf.Ticker(ticker).history(start=computed_end_period, end=self.get_start_period)
 
                 if not df.empty:
                     underlier_prices_dict[ticker] = [df.index[0].date(), df.iloc[0][column_name]]
@@ -265,7 +279,7 @@ class YahooFinanceExtractor(MarketDataExtractor):
 
 class FREDExtractor(MarketDataExtractor):
     def __init__(self, start_date, end_date, tickers):
-        super().__init__(start_date, end_date, tickers)
+        super().__init__("FRED", start_date, end_date, tickers)
         self.__api_key = CONFIG.FRED_API_KEY
 
     def fetch_data(self) -> float | pd.DataFrame:
@@ -287,12 +301,12 @@ class FREDExtractor(MarketDataExtractor):
         """
 
         try:
-            if self.__start_period == self.__end_period:
+            if self.get_start_period == self.get_end_period:
 
                 # Fetch data from FRED
-                data = web.DataReader(FRED_SERIES_IDS[self.__tickers],
-                                      "fred", self.__start_period,
-                                      self.__end_period,
+                data = web.DataReader(FRED_SERIES_IDS[self.get_tickers],
+                                      "fred", self.get_start_period,
+                                      self.get_end_period,
                                       api_key=CONFIG['FRED_API_KEY'])
                 return data.values[0][0] / 100
             else:
@@ -302,35 +316,138 @@ class FREDExtractor(MarketDataExtractor):
 
 
 class PolygonIoExtractor(MarketDataExtractor):
-    """Extracts historical equity data from Polygon.io."""
+
+    """
+    Description
+    -----------
+    Extracts historical equity data from Polygon.io.
+
+    This class retrieves time-series market data for specified tickers using the Polygon.io API.
+    It fetches data within a given date range and stores it as a Pandas DataFrame.
+
+    Parameters:
+    -----------
+    start_date : str
+        The start date for data retrieval (YYYY-MM-DD format).
+
+    end_date : str
+        The end date for data retrieval (YYYY-MM-DD format).
+
+    tickers : str or List[str]
+        A single stock ticker or a list of tickers to extract historical data.
+
+    Attributes:
+    -----------
+    __api_key : str
+        The API key used for authenticating requests to Polygon.io.
+
+    __client : polygon.RESTClient
+        The client instance for interacting with the Polygon.io API.
+
+    Methods:
+    --------
+    fetch_data() -> Dict[str, pd.DataFrame]
+        Fetches historical market data for the specified tickers and time range.
+        Returns a dictionary where keys are tickers and values are Pandas DataFrames
+        containing Open, High, Low, Close, and Volume data.
+
+    Raises:
+    -------
+    ValueError:
+        If no tickers are provided.
+
+    RuntimeError:
+        If the API request fails due to an invalid key or network issues.
+
+    Example Usage:
+    --------------
+    ```python
+    extractor = PolygonIoExtractor(start_date="2025-02-18", end_date="2025-03-12", tickers=["AAPL", "GOOGL"])
+    extractor.fetch_data()
+    ```
+    """
+
 
     def __init__(self, start_date, end_date, tickers):
-        super().__init__(start_date, end_date, tickers)
-        self.__api_key = CONFIG.POLYGON_API_KEY
+        super().__init__("PolygonIO", start_date, end_date, tickers)
+        self.__api_key = CONFIG["POLYGON_IO_API_KEY"]
         self.__client = RESTClient(self.__api_key)
+
+    def get_company_details(self, ticker: str) -> pd.DataFrame:
+        """
+        Fetch company information such as name, sector, industry, and description from Polygon.io.
+
+        Returns:
+        --------
+        dict :
+            A dictionary containing company details.
+
+        Raises:
+        -------
+        RuntimeError:
+            If the API request fails due to network issues.
+        """
+        if not self.get_tickers:
+            raise ValueError("No tickers specified for Polygon.io extractor.")
+
+        company_info = {}
+        for ticker in self.get_tickers:
+            try:
+                response = self.__client.get_ticker_details(ticker)
+                if not response:
+                    print(f"No company info found for {ticker}.")
+                    continue
+
+                # Extract relevant fields
+                company_info[ticker] = {
+                    "name": response.name,
+                    "description": response.description,
+                    "market": response.market,
+                    "sic_code": response.sic_code,
+                    "sic_description": response.sic_description,
+                    "address": response.address.address1,
+                    "city": response.address.city,
+                    "currency_name": response.currency_name,
+                    "phone_number": response.phone_number,
+                    "homepage_url": response.homepage_url,
+                    "market_cap": response.market_cap,
+                    "employees": response.total_employees,
+                    "list_date": response.list_date,
+                    "exchange": response.primary_exchange,
+                    "logo_url": response.branding.logo_url,
+                    "icon_url": response.branding.icon_url
+                }
+
+            except Exception as e:
+                print(f"Error fetching company info for {ticker} from Polygon.io: {e}")
+
+        return company_info
 
     def fetch_data(self):
         """Fetch historical stock data from Polygon.io."""
-        if not self.__tickers:
+        if not self.get_tickers:
             raise ValueError("No tickers specified for Polygon.io extractor.")
 
         all_data = dict()
-        for ticker in self.__tickers:
+        for ticker in self.get_tickers:
             aggs = self.__client.get_aggs(
                 ticker=ticker, multiplier=1, timespan="day",
-                from_=self.__start_period, to=self.__end_period
+                from_=self.get_start_period, to=self.get_end_period
             )
             df = pd.DataFrame(aggs)
-            df["date"] = pd.to_datetime(df["t"], unit="ms")
+            df["date"] = pd.to_datetime(df["timestamp"], unit="ms").dt.date
             df.set_index("date", inplace=True)
             df["ticker"] = ticker
-            all_data.append(df[["o", "h", "l", "c", "v", "ticker"]])
+            all_data[ticker] = df
 
-        if all_data:
-            self.set_data(pd.concat(all_data))
-        print(f"Fetched data from Polygon.io for {self.tickers}")
+        for ticker in all_data.keys():
+            if all_data[ticker].empty:
+                print(f"No data available for {ticker}")
+            else:
+                print(f"For {ticker} and for time window {self.get_start_period} to {self.get_end_period}"
+                      f" {len(all_data[ticker])} has been extracted.")
 
-    # ---------------- Factory Function ----------------
+        print(f"Fetching data from Polygon.io has been completed!!")
 
 
 class DataProviderFactory:
@@ -338,6 +455,55 @@ class DataProviderFactory:
 
     @staticmethod
     def get_extractor(provider, start_date, end_date, tickers):
+        """
+         Description
+         -----------
+
+         Factory method to return an appropriate MarketDataExtractor instance
+         based on the specified provider.
+
+         Parameters:
+         -----------
+         provider : str
+             The name of the data provider. Must be one of:
+            -"YahooFinance" : Fetches stock market data from Yahoo Finance.
+
+            -"FRED" : Fetches economic indicators from Federal Reserve Economic Data (FRED).
+
+            -"PolygonIO" : Fetches stock market data from Polygon.io.
+
+         start_date : str
+             The start date of the data extraction period (format: "YYYY-MM-DD").
+
+         end_date : str
+             The end date of the data extraction period (format: "YYYY-MM-DD").
+
+         tickers : list[str]
+             A list of stock symbols or economic indicators to extract.
+
+         Returns:
+         --------
+         MarketDataExtractor
+             An instance of the appropriate subclass of MarketDataExtractor
+             (YahooFinanceExtractor, FREDExtractor, or PolygonIOExtractor).
+
+         Raises:
+         -------
+         ValueError
+             If the provided `provider` is not one of the available extractors.
+
+         Examples:
+         ---------
+         >>> extractor = DataProviderFactory.get_extractor("YahooFinance", "2025-02-18", "2025-03-12", ["AAPL", "MSFT"])
+         >>> extractor.fetch_data()
+         >>> print(extractor.data.head())
+
+         >>> extractor = DataProviderFactory.get_extractor("FRED", "2025-01-01", "2025-03-12", ["FRED/GDP"])
+         >>> extractor.fetch_data()
+         >>> print(extractor.data.head())
+
+        """
+
         extractors = {
             "YahooFinance": YahooFinanceExtractor,
             "FRED": FREDExtractor,

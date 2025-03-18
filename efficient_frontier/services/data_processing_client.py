@@ -1,7 +1,9 @@
 import pandas as pd
-from typing import List, Dict
-from efficient_frontier.models import EquityPrice,Ticker
-
+from typing import List, Dict, Optional, Tuple
+from efficient_frontier.models import EquityPrice, Ticker
+from tool_kit.plots import PlotUsingMatplotLib
+import matplotlib.pyplot as plt
+import numpy as np
 
 class StockTimeSeriesProcessor:
     """
@@ -45,7 +47,7 @@ class StockTimeSeriesProcessor:
         self.df_dict = {}  # Reset data dictionary
 
         for ticker in self.__tickers:
-            ticker_object=Ticker.objects.get(ticker=ticker)
+            ticker_object = Ticker.objects.get(ticker=ticker)
             time_series = EquityPrice.objects.filter(ticker=ticker_object).values("date", "close_price")
             df = pd.DataFrame(list(time_series))
 
@@ -56,8 +58,8 @@ class StockTimeSeriesProcessor:
             self.df_dict[ticker] = df
 
     # ===========================================
-        # REGION: Getter & Setter for Tickers
-        # ===========================================
+    # REGION: Getter & Setter for Tickers
+    # ===========================================
 
     @property
     def get_tickers(self) -> List[str]:
@@ -132,6 +134,147 @@ class StockTimeSeriesProcessor:
         """
         df = self.df_dict.get(ticker)
         return df["close_price"].describe() if df is not None and not df.empty else pd.DataFrame()
+
+    def plot_time_series(self,
+                         nrows: Optional[int] = None,
+                         ncols: Optional[int] = None,
+                         figsize: Tuple[int, int] = (12, 6)) -> Tuple[plt.Figure, plt.Axes]:
+        """
+        Plots the close price time series for all loaded tickers.
+
+        This method prepares the data from `df_dict` and uses `PlotUsingMatplotLib` to
+        generate a time series plot.
+
+        Parameters:
+        -----------
+        nrows : int, optional
+            Number of rows in the subplot grid. Defaults to `None` (single plot).
+
+        ncols : int, optional
+            Number of columns in the subplot grid. Defaults to `None` (single plot).
+
+        figsize : Tuple[int, int], optional
+            Figure size in inches (width, height). Defaults to `(12, 6)`.
+
+        Returns:
+        --------
+        Tuple[plt.Figure, plt.Axes]
+            A tuple containing the Matplotlib Figure and Axes objects.
+
+        Raises:
+        -------
+        ValueError:
+            If no data is available for plotting.
+        """
+        if not self.df_dict:
+            raise ValueError("No data available for plotting. Load data first.")
+
+        ts_df_list = []
+        ts_labels_list = []
+
+        for ticker, df in self.df_dict.items():
+            if not df.empty:
+                ts_df_list.append(df[["date", "close_price"]])
+                ts_labels_list.append(ticker)
+
+        if not ts_df_list:
+            raise ValueError("All loaded tickers have empty data. Cannot plot.")
+
+        return PlotUsingMatplotLib.plot(ts_df_list, ts_labels_list, "Date", "Close Price",
+                                        nrows=nrows, ncols=ncols, figsize=figsize)
+
+    def calculate_returns(self, tickers: Optional[list] = None, method: str = "simple", frequency: str = "daily") -> \
+    Dict[str, pd.DataFrame]:
+        """
+        Calculates log or simple returns for multiple tickers at a specified frequency.
+        Uses NumPy for efficient calculations and returns a dictionary of Pandas DataFrames.
+
+        Parameters:
+        -----------
+        tickers : list, optional
+            A list of stock ticker symbols. If None, it calculates for all loaded tickers.
+
+        method : str, optional, default="simple"
+            - `"simple"`: Simple returns as `(P_t / P_(t-1)) - 1`
+            - `"log"`: Log returns as `log(P_t / P_(t-1))`
+
+        frequency : str, optional, default="daily"
+            - `"daily"`: Computes daily returns
+            - `"weekly"`: Computes weekly returns
+            - `"monthly"`: Computes monthly returns
+
+        Returns:
+        --------
+        Dict[str, pd.DataFrame]
+            A dictionary where:
+            - **Keys** = Ticker symbols (str)
+            - **Values** = Pandas DataFrames containing the calculated returns.
+
+        Raises:
+        -------
+        ValueError:
+            - If no tickers are provided or loaded.
+            - If an invalid method or frequency is provided.
+
+        Example:
+        --------
+        >>> processor.calculate_returns(["AAPL", "TSLA"], method="log", frequency="weekly")
+        """
+
+        if tickers is None:
+            tickers = self.__tickers  # Use all tickers if not provided
+
+        if not tickers:
+            raise ValueError("⚠️ ERROR: No tickers provided. Use `set_tickers()` to load data first.")
+
+        # Frequency mapping
+        frequency_map = {"daily": "D", "weekly": "W", "monthly": "M"}
+        if frequency not in frequency_map:
+            raise ValueError("⚠️ ERROR: Invalid frequency. Choose from 'daily', 'weekly', or 'monthly'.")
+
+        returns_dict = {}  # Dictionary to store results
+
+        for ticker in tickers:
+            if ticker not in self.df_dict:
+                print(f"⚠️ WARNING: Ticker '{ticker}' not found. Skipping...")
+                continue
+
+            df = self.df_dict[ticker].copy()
+
+            if df.empty:
+                print(f"⚠️ WARNING: No data available for '{ticker}'. Skipping...")
+                continue
+
+            df["close_price"] = df["close_price"].astype(float)
+            # ✅ Fix: Ensure 'date' column is set as index
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"])  # Convert to Datetime
+                df.set_index("date", inplace=True)  # Set 'date' as index
+
+            if not isinstance(df.index, pd.DatetimeIndex):
+                raise ValueError(f"⚠️ ERROR: Index for '{ticker}' is not a DatetimeIndex. Check data formatting.")
+
+            # Resample for different frequencies
+            df_resampled = df["close_price"].resample(frequency_map[frequency]).last().dropna()
+
+            # Convert to NumPy for efficient calculations
+            prices = df_resampled.values
+
+            # Calculate returns using NumPy
+            if method == "simple":
+                returns = prices[1:] / prices[:-1] - 1
+            elif method == "log":
+                returns = np.log(prices[1:] / prices[:-1])
+            else:
+                raise ValueError("⚠️ ERROR: Invalid method. Choose 'simple' or 'log'.")
+
+            # Convert back to Pandas for reporting
+            returns_df = pd.DataFrame(returns, index=df_resampled.index[1:], columns=["returns"])
+
+            # Store results in dictionary
+            returns_dict[ticker] = returns_df
+
+        return returns_dict
 
     def export_to_csv(self, ticker: str, file_name: str):
         """

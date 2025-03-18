@@ -7,6 +7,7 @@ import pandas as pd
 from tool_kit.config_loader import CONFIG
 import pandas_datareader.data as web
 from polygon import RESTClient
+import time
 
 FRED_SERIES_IDS = {
     # Treasury Yields
@@ -49,11 +50,6 @@ FRED_SERIES_IDS = {
 }
 
 
-#
-# client=RESTClient('2I8_POlvy5wQLpOUZIwIsl7LH9Hm8yPp')
-#aggs = client.get_daily_open_close_agg()
-
-
 class MarketDataExtractor(abc.ABC):
     """
     Market Data Extraction Utility.
@@ -72,9 +68,6 @@ class MarketDataExtractor(abc.ABC):
     -----------
     equity_tickers : str or List[str], optional, default="TSLA"
         The ticker symbol(s) of the equities to fetch data for.
-
-    instrument_id : str, optional, default='1Y'
-        The identifier for economic indicators (e.g., Treasury yields, inflation rates).
 
     start_period : str, optional, default=None
         The start date for data retrieval (YYYY-MM-DD format).
@@ -119,7 +112,7 @@ class MarketDataExtractor(abc.ABC):
     """
 
     def __init__(self, data_provider: str,
-                 tickers: (str, List[str]) = "TSLA",
+                 tickers: List[str] | str | None = None,
                  start_period: str = None,
                  end_period: str = None):
         """
@@ -316,7 +309,6 @@ class FREDExtractor(MarketDataExtractor):
 
 
 class PolygonIoExtractor(MarketDataExtractor):
-
     """
     Description
     -----------
@@ -367,13 +359,12 @@ class PolygonIoExtractor(MarketDataExtractor):
     ```
     """
 
-
     def __init__(self, start_date, end_date, tickers):
         super().__init__("PolygonIO", start_date, end_date, tickers)
         self.__api_key = CONFIG["POLYGON_IO_API_KEY"]
         self.__client = RESTClient(self.__api_key)
 
-    def get_company_details(self, ticker: str) -> pd.DataFrame:
+    def get_company_details(self, ticker: str) -> dict:
         """
         Fetch company information such as name, sector, industry, and description from Polygon.io.
 
@@ -391,6 +382,7 @@ class PolygonIoExtractor(MarketDataExtractor):
             raise ValueError("No tickers specified for Polygon.io extractor.")
 
         company_info = {}
+        request_count = 0
         for ticker in self.get_tickers:
             try:
                 response = self.__client.get_ticker_details(ticker)
@@ -417,10 +409,18 @@ class PolygonIoExtractor(MarketDataExtractor):
                     "logo_url": response.branding.logo_url,
                     "icon_url": response.branding.icon_url
                 }
+                request_count += 1
+                print(f"Rate limit reached ({request_count}/5 requests). Sleeping for 60 seconds...")
+                time.sleep(65)  # Wait for 60 seconds before making more requestsif request_count > 5:
+                request_count = 0  # Reset request count after sleep
 
             except Exception as e:
                 print(f"Error fetching company info for {ticker} from Polygon.io: {e}")
-
+                # **Retry on rate limit error**
+                if "rate limit" in str(e).lower():
+                    print("Rate limit hit! Sleeping for 60 seconds before retrying...")
+                    time.sleep(65)  # Wait 1 minute before retrying
+                    continue  # Retry the same ticker
         return company_info
 
     def fetch_data(self):
@@ -449,60 +449,122 @@ class PolygonIoExtractor(MarketDataExtractor):
 
         print(f"Fetching data from Polygon.io has been completed!!")
 
+    def get_fx_close_price(self, fx_pair, date):
+        """
+        Fetches the closing price of a given forex pair for a specific date using the Polygon.io API.
+
+        Parameters:
+        ----------
+        fx_pair : str
+            The forex pair symbol (e.g., "C:EURUSD", "C:GBPJPY").
+        date : str
+            The date for which the closing price is needed (format: "YYYY-MM-DD").
+
+        Returns:
+        -------
+        float or None
+            The closing price if available; otherwise, returns None.
+
+        Raises:
+        ------
+        ValueError
+            If the API response does not contain expected data.
+        Exception
+            For unexpected API errors or connection issues.
+        """
+        client = RESTClient(CONFIG["POLYGON_IO_API_KEY"])
+        try:
+            # Fetch aggregate data for the given forex pair and date
+            aggs = client.get_aggs(
+                ticker=fx_pair,
+                multiplier=1,
+                timespan="day",
+                from_=date,
+                to=date
+            )
+
+            # Validate response structure
+            if not aggs:
+                raise ValueError(f"No data available for {fx_pair} on {date}")
+
+            # Extract the closing price
+            close_price = aggs[0].close
+            print(f"Date: {date}, Forex Pair: {fx_pair}, Close Price: {close_price}")
+            return close_price
+
+        except ValueError as ve:
+            print(f"Error: {ve}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error fetching FX close price: {e}")
+            return None
+
+        print(f"Date: {date},  Close: {aggs[0].close}")
+        return aggs[0].close
+
 
 class DataProviderFactory:
-    """Factory to create the appropriate MarketDataExtractor instance."""
+    """Factory class for creating instances of MarketDataExtractor.
+    This factory dynamically selects and instantiates the appropriate extractor
+    based on the specified data provider. Supported providers include Yahoo Finance,
+    Federal Reserve Economic Data (FRED), and Polygon.io.
+
+    Methods:
+    --------
+    get_extractor(provider: str, start_date: str | None, end_date: str | None = None, tickers: List[str] | str | None = None) -> MarketDataExtractor
+    Creates and returns an instance of a MarketDataExtractor subclass based on the specified provider."""
 
     @staticmethod
-    def get_extractor(provider, start_date, end_date, tickers):
+    def get_extractor(provider: str,
+                      start_date: str | None = None,
+                      end_date: str | None = None,
+                      tickers: List[str] | str | None = None) -> YahooFinanceExtractor|FREDExtractor|PolygonIoExtractor:
         """
-         Description
-         -----------
+     Description:
+     -----------
+     Factory method to instantiate and return an appropriate MarketDataExtractor instance.
 
-         Factory method to return an appropriate MarketDataExtractor instance
-         based on the specified provider.
+     Parameters:
+     -----------
+     provider : str
+         The name of the data provider. Must be one of:
+        -"YahooFinance" : Fetches stock market data from Yahoo Finance.
 
-         Parameters:
-         -----------
-         provider : str
-             The name of the data provider. Must be one of:
-            -"YahooFinance" : Fetches stock market data from Yahoo Finance.
+        -"FRED" : Fetches economic indicators from Federal Reserve Economic Data (FRED).
 
-            -"FRED" : Fetches economic indicators from Federal Reserve Economic Data (FRED).
+        -"PolygonIO" : Fetches stock market data from Polygon.io.
 
-            -"PolygonIO" : Fetches stock market data from Polygon.io.
+     start_date : str
+         The start date of the data extraction period (format: "YYYY-MM-DD").
 
-         start_date : str
-             The start date of the data extraction period (format: "YYYY-MM-DD").
+     end_date : str
+         The end date of the data extraction period (format: "YYYY-MM-DD").
 
-         end_date : str
-             The end date of the data extraction period (format: "YYYY-MM-DD").
+     tickers : list[str]
+         A list of stock symbols or economic indicators to extract.
 
-         tickers : list[str]
-             A list of stock symbols or economic indicators to extract.
+     Returns:
+     --------
+     MarketDataExtractor
+         An instance of the appropriate subclass of MarketDataExtractor
+         (YahooFinanceExtractor, FREDExtractor, or PolygonIOExtractor).
 
-         Returns:
-         --------
-         MarketDataExtractor
-             An instance of the appropriate subclass of MarketDataExtractor
-             (YahooFinanceExtractor, FREDExtractor, or PolygonIOExtractor).
+     Raises:
+     -------
+     ValueError
+         If the provided `provider` is not one of the available extractors.
 
-         Raises:
-         -------
-         ValueError
-             If the provided `provider` is not one of the available extractors.
+     Examples:
+     ---------
+     >>> extractor = DataProviderFactory.get_extractor("YahooFinance", "2025-02-18", "2025-03-12", ["AAPL", "MSFT"])
+     >>> extractor.fetch_data()
+     >>> print(extractor.data.head())
 
-         Examples:
-         ---------
-         >>> extractor = DataProviderFactory.get_extractor("YahooFinance", "2025-02-18", "2025-03-12", ["AAPL", "MSFT"])
-         >>> extractor.fetch_data()
-         >>> print(extractor.data.head())
+     >>> extractor = DataProviderFactory.get_extractor("FRED", "2025-01-01", "2025-03-12", ["FRED/GDP"])
+     >>> extractor.fetch_data()
+     >>> print(extractor.data.head())
 
-         >>> extractor = DataProviderFactory.get_extractor("FRED", "2025-01-01", "2025-03-12", ["FRED/GDP"])
-         >>> extractor.fetch_data()
-         >>> print(extractor.data.head())
-
-        """
+    """
 
         extractors = {
             "YahooFinance": YahooFinanceExtractor,

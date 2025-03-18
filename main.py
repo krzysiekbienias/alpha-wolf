@@ -5,6 +5,7 @@ import pandas as pd
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'base.settings')
 django.setup()
 from efficient_frontier.services.market_data_client import DataProviderFactory, MarketDataExtractor
+from efficient_frontier.services.data_processing_client import StockTimeSeriesProcessor
 from typing import List
 from tool_kit.database_api import fetch_and_store_company_info, fetch_and_store_equity_prices
 
@@ -20,9 +21,16 @@ if __name__ == '__main__':
     # ===========================================
     # END REGION: Input
     # ===========================================
-    extractor = DataProviderFactory.get_extractor(provider)
-    extractor.set_start_period(start_time_window)
-    extractor.get_fx_close_price(fx_pair="C:EURGBP",
-                                 date=start_time_window)
+    # extractor = DataProviderFactory.get_extractor(provider)
+    # extractor.set_start_period(start_time_window)
+    # extractor.get_fx_close_price(fx_pair="C:EURGBP",
+    #                              date=start_time_window)
+    data_processor = StockTimeSeriesProcessor()
+    data_processor.set_tickers(new_tickers=['AAPL'])
+
+
+
+
+
 
     print("Hello World")
